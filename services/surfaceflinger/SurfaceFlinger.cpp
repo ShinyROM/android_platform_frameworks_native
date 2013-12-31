@@ -522,8 +522,13 @@ void SurfaceFlinger::init() {
             *static_cast<HWComposer::EventHandler *>(this));
 
     // First try to get an ES2 config
+#ifdef TARGET_DISABLE_SURFACEFLINGER_GLES2
+	ALOGW("OpenGL ES 2.0 disabled for this device");
+	err = !NO_ERROR;
+#else
     err = selectEGLConfig(mEGLDisplay, mHwc->getVisualID(), EGL_OPENGL_ES2_BIT,
             &mEGLConfig);
+#endif
 
     if (err != NO_ERROR) {
         // If ES2 fails, try ES1
