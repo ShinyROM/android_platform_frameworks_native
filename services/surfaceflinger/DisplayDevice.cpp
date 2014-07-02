@@ -53,6 +53,7 @@ DisplayDevice::DisplayDevice(
         const sp<SurfaceFlinger>& flinger,
         DisplayType type,
         int32_t hwcId,
+        int format,
         bool isSecure,
         const wp<IBinder>& displayToken,
         const sp<DisplaySurface>& displaySurface,
@@ -76,8 +77,19 @@ DisplayDevice::DisplayDevice(
     mNativeWindow = new Surface(producer, false);
     ANativeWindow* const window = mNativeWindow.get();
 
-    int format;
-    window->query(window, NATIVE_WINDOW_FORMAT, &format);
+    /*
+     * Create our display's surface
+     */
+
+    EGLSurface surface;
+    EGLint w, h;
+    EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    if (config == EGL_NO_CONFIG) {
+        config = RenderEngine::chooseEglConfig(display, format);
+    }
+    surface = eglCreateWindowSurface(display, config, window, NULL);
+    eglQuerySurface(display, surface, EGL_WIDTH,  &mDisplayWidth);
+    eglQuerySurface(display, surface, EGL_HEIGHT, &mDisplayHeight);
 
     // Make sure that composition can never be stalled by a virtual display
     // consumer that isn't processing buffers fast enough. We have to do this
@@ -88,17 +100,6 @@ DisplayDevice::DisplayDevice(
     //   interval we set here.
     if (mType >= DisplayDevice::DISPLAY_VIRTUAL)
         window->setSwapInterval(window, 0);
-
-    /*
-     * Create our display's surface
-     */
-
-    EGLSurface surface;
-    EGLint w, h;
-    EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    surface = eglCreateWindowSurface(display, config, window, NULL);
-    eglQuerySurface(display, surface, EGL_WIDTH,  &mDisplayWidth);
-    eglQuerySurface(display, surface, EGL_HEIGHT, &mDisplayHeight);
 
     mDisplay = display;
     mSurface = surface;
@@ -461,7 +462,7 @@ void DisplayDevice::dump(String8& result) const {
     result.appendFormat(
         "+ DisplayDevice: %s\n"
         "   type=%x, hwcId=%d, layerStack=%u, (%4dx%4d), ANativeWindow=%p, orient=%2d (type=%08x), "
-        "flips=%u, isSecure=%d, secureVis=%d, acquired=%d, numLayers=%u\n"
+        "flips=%u, isSecure=%d, secureVis=%d, acquired=%d, numLayers=%zu\n"
         "   v:[%d,%d,%d,%d], f:[%d,%d,%d,%d], s:[%d,%d,%d,%d],"
         "transform:[[%0.3f,%0.3f,%0.3f][%0.3f,%0.3f,%0.3f][%0.3f,%0.3f,%0.3f]]\n",
         mDisplayName.string(), mType, mHwcDisplayId,

@@ -16,12 +16,13 @@
 
 #define ATRACE_TAG ATRACE_TAG_GRAPHICS
 
+#include <inttypes.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
-#include <math.h>
 
 #include <utils/CallStack.h>
 #include <utils/Errors.h>
@@ -571,7 +572,11 @@ uint32_t HWComposer::getHeight(int disp) const {
 }
 
 uint32_t HWComposer::getFormat(int disp) const {
-    return mDisplayData[disp].format;
+    if (uint32_t(disp)>31 || !mAllocatedDisplayIDs.hasBit(disp)) {
+        return HAL_PIXEL_FORMAT_RGBA_8888;
+    } else {
+        return mDisplayData[disp].format;
+    }
 }
 
 float HWComposer::getDpiX(int disp) const {
@@ -1268,12 +1273,12 @@ void HWComposer::dump(String8& result) const {
                     mFlinger->getLayerSortedByZForHwcDisplay(i);
 
             result.appendFormat(
-                    "  Display[%d] : %ux%u, xdpi=%f, ydpi=%f, refresh=%lld\n",
+                    "  Display[%zd] : %ux%u, xdpi=%f, ydpi=%f, refresh=%" PRId64 "\n",
                     i, disp.width, disp.height, disp.xdpi, disp.ydpi, disp.refresh);
 
             if (disp.list) {
                 result.appendFormat(
-                        "  numHwLayers=%u, flags=%08x\n",
+                        "  numHwLayers=%zu, flags=%08x\n",
                         disp.list->numHwLayers, disp.list->flags);
 
                 result.append(
@@ -1312,7 +1317,7 @@ void HWComposer::dump(String8& result) const {
 
                     if (hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_3)) {
                         result.appendFormat(
-                                " %10s | %08x | %08x | %08x | %02x | %05x | %08x | [%7.1f,%7.1f,%7.1f,%7.1f] | [%5d,%5d,%5d,%5d] %s\n",
+                                " %10s | %08" PRIxPTR " | %08x | %08x | %02x | %05x | %08x | [%7.1f,%7.1f,%7.1f,%7.1f] | [%5d,%5d,%5d,%5d] %s\n",
                                         compositionTypeName[type],
                                         intptr_t(l.handle), l.hints, l.flags, l.transform, l.blending, format,
                                         l.sourceCropf.left, l.sourceCropf.top, l.sourceCropf.right, l.sourceCropf.bottom,
@@ -1320,7 +1325,7 @@ void HWComposer::dump(String8& result) const {
                                         name.string());
                     } else {
                         result.appendFormat(
-                                " %10s | %08x | %08x | %08x | %02x | %05x | %08x | [%7d,%7d,%7d,%7d] | [%5d,%5d,%5d,%5d] %s\n",
+                                " %10s | %08" PRIxPTR " | %08x | %08x | %02x | %05x | %08x | [%7d,%7d,%7d,%7d] | [%5d,%5d,%5d,%5d] %s\n",
                                         compositionTypeName[type],
                                         intptr_t(l.handle), l.hints, l.flags, l.transform, l.blending, format,
                                         l.sourceCrop.left, l.sourceCrop.top, l.sourceCrop.right, l.sourceCrop.bottom,
@@ -1396,7 +1401,7 @@ bool HWComposer::VSyncThread::threadLoop() {
 }
 
 HWComposer::DisplayData::DisplayData()
-:   width(0), height(0), format(0),
+:   width(0), height(0), format(HAL_PIXEL_FORMAT_RGBA_8888),
     xdpi(0.0f), ydpi(0.0f),
     refresh(0),
     connected(false),

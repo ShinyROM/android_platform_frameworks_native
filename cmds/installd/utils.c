@@ -1,16 +1,16 @@
 /*
 ** Copyright 2008, The Android Open Source Project
 **
-** Licensed under the Apache License, Version 2.0 (the "License"); 
-** you may not use this file except in compliance with the License. 
-** You may obtain a copy of the License at 
+** Licensed under the Apache License, Version 2.0 (the "License");
+** you may not use this file except in compliance with the License.
+** You may obtain a copy of the License at
 **
-**     http://www.apache.org/licenses/LICENSE-2.0 
+**     http://www.apache.org/licenses/LICENSE-2.0
 **
-** Unless required by applicable law or agreed to in writing, software 
-** distributed under the License is distributed on an "AS IS" BASIS, 
-** WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. 
-** See the License for the specific language governing permissions and 
+** Unless required by applicable law or agreed to in writing, software
+** distributed under the License is distributed on an "AS IS" BASIS,
+** WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+** See the License for the specific language governing permissions and
 ** limitations under the License.
 */
 
@@ -149,6 +149,17 @@ int create_user_media_path(char path[PATH_MAX], userid_t userid) {
     return 0;
 }
 
+/**
+ * Create the path name for config for a certain userid.
+ * Returns 0 on success, and -1 on failure.
+ */
+int create_user_config_path(char path[PATH_MAX], userid_t userid) {
+    if (snprintf(path, PATH_MAX, "%s%d", "/data/misc/user/", userid) > PATH_MAX) {
+        return -1;
+    }
+    return 0;
+}
+
 int create_move_path(char path[PKG_PATH_MAX],
     const char* pkgname,
     const char* leaf,
@@ -208,7 +219,8 @@ int is_valid_package_name(const char* pkgname) {
     return 0;
 }
 
-static int _delete_dir_contents(DIR *d, const char *ignore)
+static int _delete_dir_contents(DIR *d,
+                                int (*exclusion_predicate)(const char *name, const int is_dir))
 {
     int result = 0;
     struct dirent *de;
@@ -221,8 +233,10 @@ static int _delete_dir_contents(DIR *d, const char *ignore)
     while ((de = readdir(d))) {
         const char *name = de->d_name;
 
-            /* skip the ignore name if provided */
-        if (ignore && !strcmp(name, ignore)) continue;
+            /* check using the exclusion predicate, if provided */
+        if (exclusion_predicate && exclusion_predicate(name, (de->d_type == DT_DIR))) {
+            continue;
+        }
 
         if (de->d_type == DT_DIR) {
             int r, subfd;
@@ -247,7 +261,7 @@ static int _delete_dir_contents(DIR *d, const char *ignore)
                 result = -1;
                 continue;
             }
-            if (_delete_dir_contents(subdir, 0)) {
+            if (_delete_dir_contents(subdir, exclusion_predicate)) {
                 result = -1;
             }
             closedir(subdir);
@@ -268,7 +282,7 @@ static int _delete_dir_contents(DIR *d, const char *ignore)
 
 int delete_dir_contents(const char *pathname,
                         int also_delete_dir,
-                        const char *ignore)
+                        int (*exclusion_predicate)(const char*, const int))
 {
     int res = 0;
     DIR *d;
@@ -278,7 +292,7 @@ int delete_dir_contents(const char *pathname,
         ALOGE("Couldn't opendir %s: %s\n", pathname, strerror(errno));
         return -errno;
     }
-    res = _delete_dir_contents(d, ignore);
+    res = _delete_dir_contents(d, exclusion_predicate);
     closedir(d);
     if (also_delete_dir) {
         if (rmdir(pathname)) {
@@ -435,7 +449,7 @@ static void _inc_num_cache_collected(cache_t* cache)
 {
     cache->numCollected++;
     if ((cache->numCollected%20000) == 0) {
-        ALOGI("Collected cache so far: %d directories, %d files",
+        ALOGI("Collected cache so far: %zd directories, %zd files",
             cache->numDirs, cache->numFiles);
     }
 }
@@ -730,7 +744,7 @@ void clear_cache_files(cache_t* cache, int64_t free_size)
     int skip = 0;
     char path[PATH_MAX];
 
-    ALOGI("Collected cache files: %d directories, %d files",
+    ALOGI("Collected cache files: %zd directories, %zd files",
         cache->numDirs, cache->numFiles);
 
     CACHE_NOISY(ALOGI("Sorting files..."));
@@ -1004,4 +1018,60 @@ int ensure_media_user_dirs(userid_t userid) {
     }
 
     return 0;
+}
+
+int ensure_config_user_dirs(userid_t userid) {
+    char config_user_path[PATH_MAX];
+    char path[PATH_MAX];
+
+    // writable by system, readable by any app within the same user
+    const int uid = (userid * AID_USER) + AID_SYSTEM;
+    const int gid = (userid * AID_USER) + AID_EVERYBODY;
+
+    // Ensure /data/misc/user/<userid> exists
+    create_user_config_path(config_user_path, userid);
+    if (fs_prepare_dir(config_user_path, 0750, uid, gid) == -1) {
+        return -1;
+    }
+
+   return 0;
+}
+
+int create_profile_file(const char *pkgname, gid_t gid) {
+    const char *profile_dir = DALVIK_CACHE_PREFIX "profiles";
+    char profile_file[PKG_PATH_MAX];
+
+    snprintf(profile_file, sizeof(profile_file), "%s/%s", profile_dir, pkgname);
+
+    // The 'system' user needs to be able to read the profile to determine if dex2oat
+    // needs to be run.  This is done in dalvik.system.DexFile.isDexOptNeededInternal().  So
+    // we assign ownership to AID_SYSTEM and ensure it's not world-readable.
+
+    int fd = open(profile_file, O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0660);
+
+    // Always set the uid/gid/permissions. The file could have been previously created
+    // with different permissions.
+    if (fd >= 0) {
+        if (fchown(fd, AID_SYSTEM, gid) < 0) {
+            ALOGE("cannot chown profile file '%s': %s\n", profile_file, strerror(errno));
+            close(fd);
+            unlink(profile_file);
+            return -1;
+        }
+
+        if (fchmod(fd, 0660) < 0) {
+            ALOGE("cannot chmod profile file '%s': %s\n", profile_file, strerror(errno));
+            close(fd);
+            unlink(profile_file);
+            return -1;
+        }
+        close(fd);
+    }
+    return 0;
+}
+
+void remove_profile_file(const char *pkgname) {
+    char profile_file[PKG_PATH_MAX];
+    snprintf(profile_file, sizeof(profile_file), "%s/%s", DALVIK_CACHE_PREFIX "profiles", pkgname);
+    unlink(profile_file);
 }

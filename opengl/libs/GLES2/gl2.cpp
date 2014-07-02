@@ -40,7 +40,15 @@ using namespace android;
 #undef CALL_GL_API
 #undef CALL_GL_API_RETURN
 
-#if defined(__arm__) && !USE_SLOW_BINDING
+#if USE_SLOW_BINDING
+
+    #define API_ENTRY(_api) _api
+
+    #define CALL_GL_API(_api, ...)                                       \
+        gl_hooks_t::gl_t const * const _c = &getGlThreadSpecific()->gl;  \
+        if (_c) return _c->_api(__VA_ARGS__);
+
+#elif defined(__arm__)
 
     #define GET_TLS(reg) "mrc p15, 0, " #reg ", c13, c0, 3 \n"
 
@@ -55,10 +63,66 @@ using namespace android;
             :                                                   \
             : [tls] "J"(TLS_SLOT_OPENGL_API*4),                 \
               [api] "J"(__builtin_offsetof(gl_hooks_t, gl._api))    \
-            :                                                   \
+            : "r12"                                             \
             );
 
-#elif defined(__mips__) && !USE_SLOW_BINDING
+#elif defined(__aarch64__)
+
+    #define API_ENTRY(_api) __attribute__((noinline)) _api
+
+    #define CALL_GL_API(_api, ...)                                  \
+        asm volatile(                                               \
+            "mrs x16, tpidr_el0\n"                                  \
+            "ldr x16, [x16, %[tls]]\n"                              \
+            "cbz x16, 1f\n"                                         \
+            "ldr x16, [x16, %[api]]\n"                              \
+            "br  x16\n"                                             \
+            "1:\n"                                                  \
+            :                                                       \
+            : [tls] "i" (TLS_SLOT_OPENGL_API * sizeof(void*)),      \
+              [api] "i" (__builtin_offsetof(gl_hooks_t, gl._api))   \
+            : "x16"                                                 \
+        );
+
+#elif defined(__i386__)
+
+    #define API_ENTRY(_api) __attribute__((noinline)) _api
+
+    #define CALL_GL_API(_api, ...)                                  \
+        register void** fn;                                         \
+        __asm__ volatile(                                           \
+            "mov %%gs:0, %[fn]\n"                                   \
+            "mov %P[tls](%[fn]), %[fn]\n"                           \
+            "test %[fn], %[fn]\n"                                   \
+            "je 1f\n"                                               \
+            "jmp *%P[api](%[fn])\n"                                 \
+            "1:\n"                                                  \
+            : [fn] "=r" (fn)                                        \
+            : [tls] "i" (TLS_SLOT_OPENGL_API*sizeof(void*)),        \
+              [api] "i" (__builtin_offsetof(gl_hooks_t, gl._api))   \
+            : "cc"                                                  \
+            );
+
+#elif defined(__x86_64__)
+
+    #define API_ENTRY(_api) __attribute__((noinline)) _api
+
+    #define CALL_GL_API(_api, ...)                                  \
+         register void** fn;                                        \
+         __asm__ volatile(                                          \
+            "mov %%fs:0, %[fn]\n"                                   \
+            "mov %P[tls](%[fn]), %[fn]\n"                           \
+            "test %[fn], %[fn]\n"                                   \
+            "je 1f\n"                                               \
+            "jmp *%P[api](%[fn])\n"                                 \
+            "1:\n"                                                  \
+            : [fn] "=r" (fn)                                        \
+            : [tls] "i" (TLS_SLOT_OPENGL_API*sizeof(void*)),        \
+              [api] "i" (__builtin_offsetof(gl_hooks_t, gl._api))   \
+            : "cc"                                                  \
+            );
+
+#elif defined(__mips__)
 
     #define API_ENTRY(_api) __attribute__((noinline)) _api
 
@@ -89,14 +153,6 @@ using namespace android;
               [API] "I"(__builtin_offsetof(gl_hooks_t, gl._api)) \
             :                                                    \
             );
-
-#else
-
-    #define API_ENTRY(_api) _api
-
-    #define CALL_GL_API(_api, ...)                                       \
-        gl_hooks_t::gl_t const * const _c = &getGlThreadSpecific()->gl;  \
-        if (_c) return _c->_api(__VA_ARGS__);
 
 #endif
 

@@ -14,8 +14,9 @@
  * limitations under the License.
  */
 
-#include <stdint.h>
+#include <inttypes.h>
 #include <math.h>
+#include <stdint.h>
 #include <sys/types.h>
 
 #include <cutils/properties.h>
@@ -153,7 +154,7 @@ void SensorService::onFirstRef()
             char line[128];
             if (fp != NULL && fgets(line, sizeof(line), fp) != NULL) {
                 line[sizeof(line) - 1] = '\0';
-                sscanf(line, "%u", &mSocketBufferSize);
+                sscanf(line, "%zu", &mSocketBufferSize);
                 if (mSocketBufferSize > MAX_SOCKET_BUFFER_SIZE_BATCHED) {
                     mSocketBufferSize = MAX_SOCKET_BUFFER_SIZE_BATCHED;
                 }
@@ -200,7 +201,7 @@ SensorService::~SensorService()
 
 static const String16 sDump("android.permission.DUMP");
 
-status_t SensorService::dump(int fd, const Vector<String16>& args)
+status_t SensorService::dump(int fd, const Vector<String16>& /*args*/)
 {
     String8 result;
     if (!PermissionCache::checkCallingPermission(sDump)) {
@@ -257,7 +258,7 @@ status_t SensorService::dump(int fd, const Vector<String16>& args)
                     result.appendFormat( "last=<%f>\n", e.data[0]);
                     break;
                 case SENSOR_TYPE_STEP_COUNTER:
-                    result.appendFormat( "last=<%llu>\n", e.u64.step_counter);
+                    result.appendFormat( "last=<%" PRIu64 ">\n", e.u64.step_counter);
                     break;
                 default:
                     // default to 3 values
@@ -273,19 +274,19 @@ status_t SensorService::dump(int fd, const Vector<String16>& args)
         result.append("Active sensors:\n");
         for (size_t i=0 ; i<mActiveSensors.size() ; i++) {
             int handle = mActiveSensors.keyAt(i);
-            result.appendFormat("%s (handle=0x%08x, connections=%d)\n",
+            result.appendFormat("%s (handle=0x%08x, connections=%zu)\n",
                     getSensorName(handle).string(),
                     handle,
                     mActiveSensors.valueAt(i)->getNumConnections());
         }
 
-        result.appendFormat("%u Max Socket Buffer size\n", mSocketBufferSize);
-        result.appendFormat("%d active connections\n", mActiveConnections.size());
+        result.appendFormat("%zu Max Socket Buffer size\n", mSocketBufferSize);
+        result.appendFormat("%zd active connections\n", mActiveConnections.size());
 
         for (size_t i=0 ; i < mActiveConnections.size() ; i++) {
             sp<SensorEventConnection> connection(mActiveConnections[i].promote());
             if (connection != 0) {
-                result.appendFormat("Connection Number: %d \n", i);
+                result.appendFormat("Connection Number: %zu \n", i);
                 connection->dump(result);
             }
         }
@@ -369,7 +370,7 @@ bool SensorService::threadLoop()
                     for (size_t j=0 ; j<activeVirtualSensorCount ; j++) {
                         if (count + k >= minBufferSize) {
                             ALOGE("buffer too small to hold all events: "
-                                    "count=%u, k=%u, size=%u",
+                                    "count=%zd, k=%zu, size=%zu",
                                     count, k, minBufferSize);
                             break;
                         }
@@ -508,11 +509,11 @@ void SensorService::cleanupConnection(SensorEventConnection* c)
     Mutex::Autolock _l(mLock);
     const wp<SensorEventConnection> connection(c);
     size_t size = mActiveSensors.size();
-    ALOGD_IF(DEBUG_CONNECTIONS, "%d active sensors", size);
+    ALOGD_IF(DEBUG_CONNECTIONS, "%zu active sensors", size);
     for (size_t i=0 ; i<size ; ) {
         int handle = mActiveSensors.keyAt(i);
         if (c->hasSensor(handle)) {
-            ALOGD_IF(DEBUG_CONNECTIONS, "%i: disabling handle=0x%08x", i, handle);
+            ALOGD_IF(DEBUG_CONNECTIONS, "%zu: disabling handle=0x%08x", i, handle);
             SensorInterface* sensor = mSensorMap.valueFor( handle );
             ALOGE_IF(!sensor, "mSensorMap[handle=0x%08x] is null!", handle);
             if (sensor) {
@@ -520,9 +521,9 @@ void SensorService::cleanupConnection(SensorEventConnection* c)
             }
         }
         SensorRecord* rec = mActiveSensors.valueAt(i);
-        ALOGE_IF(!rec, "mActiveSensors[%d] is null (handle=0x%08x)!", i, handle);
+        ALOGE_IF(!rec, "mActiveSensors[%zu] is null (handle=0x%08x)!", i, handle);
         ALOGD_IF(DEBUG_CONNECTIONS,
-                "removing connection %p for sensor[%d].handle=0x%08x",
+                "removing connection %p for sensor[%zu].handle=0x%08x",
                 c, i, handle);
 
         if (rec && rec->removeConnection(connection)) {
@@ -590,7 +591,7 @@ status_t SensorService::enable(const sp<SensorEventConnection>& connection,
         samplingPeriodNs = minDelayNs;
     }
 
-    ALOGD_IF(DEBUG_CONNECTIONS, "Calling batch handle==%d flags=%d rate=%lld timeout== %lld",
+    ALOGD_IF(DEBUG_CONNECTIONS, "Calling batch handle==%d flags=%d rate=%" PRId64 " timeout== %" PRId64,
              handle, reservedFlags, samplingPeriodNs, maxBatchReportLatencyNs);
 
     status_t err = sensor->batch(connection.get(), handle, reservedFlags, samplingPeriodNs,

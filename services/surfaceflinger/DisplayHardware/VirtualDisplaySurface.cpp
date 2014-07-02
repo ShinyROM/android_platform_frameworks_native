@@ -458,8 +458,10 @@ void VirtualDisplaySurface::resetPerFrameState() {
     mCompositionType = COMPOSITION_UNKNOWN;
     mSinkBufferWidth = 0;
     mSinkBufferHeight = 0;
+    mFbFence = Fence::NO_FENCE;
     mOutputFence = Fence::NO_FENCE;
     mOutputProducerSlot = -1;
+    mFbProducerSlot = -1;
 }
 
 status_t VirtualDisplaySurface::refreshOutputBuffer() {

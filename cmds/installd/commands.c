@@ -1,19 +1,20 @@
 /*
 ** Copyright 2008, The Android Open Source Project
 **
-** Licensed under the Apache License, Version 2.0 (the "License"); 
-** you may not use this file except in compliance with the License. 
-** You may obtain a copy of the License at 
+** Licensed under the Apache License, Version 2.0 (the "License");
+** you may not use this file except in compliance with the License.
+** You may obtain a copy of the License at
 **
-**     http://www.apache.org/licenses/LICENSE-2.0 
+**     http://www.apache.org/licenses/LICENSE-2.0
 **
-** Unless required by applicable law or agreed to in writing, software 
-** distributed under the License is distributed on an "AS IS" BASIS, 
-** WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. 
-** See the License for the specific language governing permissions and 
+** Unless required by applicable law or agreed to in writing, software
+** distributed under the License is distributed on an "AS IS" BASIS,
+** WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+** See the License for the specific language governing permissions and
 ** limitations under the License.
 */
 
+#include <inttypes.h>
 #include <sys/capability.h>
 #include "installd.h"
 #include <diskusage/dirsize.h>
@@ -72,7 +73,7 @@ int install(const char *pkgname, uid_t uid, gid_t gid, const char *seinfo)
         }
     } else {
         if (S_ISDIR(libStat.st_mode)) {
-            if (delete_dir_contents(libsymlink, 1, 0) < 0) {
+            if (delete_dir_contents(libsymlink, 1, NULL) < 0) {
                 ALOGE("couldn't delete lib directory during install for: %s", libsymlink);
                 return -1;
             }
@@ -84,18 +85,18 @@ int install(const char *pkgname, uid_t uid, gid_t gid, const char *seinfo)
         }
     }
 
+    if (selinux_android_setfilecon(pkgdir, pkgname, seinfo, uid) < 0) {
+        ALOGE("cannot setfilecon dir '%s': %s\n", pkgdir, strerror(errno));
+        unlink(libsymlink);
+        unlink(pkgdir);
+        return -errno;
+    }
+
     if (symlink(applibdir, libsymlink) < 0) {
         ALOGE("couldn't symlink directory '%s' -> '%s': %s\n", libsymlink, applibdir,
                 strerror(errno));
         unlink(pkgdir);
         return -1;
-    }
-
-    if (selinux_android_setfilecon2(pkgdir, pkgname, seinfo, uid) < 0) {
-        ALOGE("cannot setfilecon dir '%s': %s\n", pkgdir, strerror(errno));
-        unlink(libsymlink);
-        unlink(pkgdir);
-        return -errno;
     }
 
     if (chown(pkgdir, uid, gid) < 0) {
@@ -114,6 +115,8 @@ int uninstall(const char *pkgname, userid_t userid)
 
     if (create_pkg_path(pkgdir, pkgname, PKG_DIR_POSTFIX, userid))
         return -1;
+
+    remove_profile_file(pkgname);
 
     /* delete contents AND directory, no exceptions */
     return delete_dir_contents(pkgdir, 1, NULL);
@@ -155,7 +158,7 @@ int fix_uid(const char *pkgname, uid_t uid, gid_t gid)
     if (stat(pkgdir, &s) < 0) return -1;
 
     if (s.st_uid != 0 || s.st_gid != 0) {
-        ALOGE("fixing uid of non-root pkg: %s %lu %lu\n", pkgdir, s.st_uid, s.st_gid);
+        ALOGE("fixing uid of non-root pkg: %s %" PRIu32 " %" PRIu32 "\n", pkgdir, s.st_uid, s.st_gid);
         return -1;
     }
 
@@ -173,6 +176,10 @@ int fix_uid(const char *pkgname, uid_t uid, gid_t gid)
     return 0;
 }
 
+static int lib_dir_matcher(const char* file_name, const int is_dir) {
+  return is_dir && !strcmp(file_name, "lib");
+}
+
 int delete_user_data(const char *pkgname, userid_t userid)
 {
     char pkgdir[PKG_PATH_MAX];
@@ -181,10 +188,10 @@ int delete_user_data(const char *pkgname, userid_t userid)
         return -1;
 
     /* delete contents, excluding "lib", but not the directory itself */
-    return delete_dir_contents(pkgdir, 0, "lib");
+    return delete_dir_contents(pkgdir, 0, &lib_dir_matcher);
 }
 
-int make_user_data(const char *pkgname, uid_t uid, userid_t userid)
+int make_user_data(const char *pkgname, uid_t uid, userid_t userid, const char* seinfo)
 {
     char pkgdir[PKG_PATH_MAX];
     char applibdir[PKG_PATH_MAX];
@@ -222,7 +229,7 @@ int make_user_data(const char *pkgname, uid_t uid, userid_t userid)
         }
     } else {
         if (S_ISDIR(libStat.st_mode)) {
-            if (delete_dir_contents(libsymlink, 1, 0) < 0) {
+            if (delete_dir_contents(libsymlink, 1, NULL) < 0) {
                 ALOGE("couldn't delete lib directory during install for non-primary: %s",
                         libsymlink);
                 unlink(pkgdir);
@@ -238,18 +245,18 @@ int make_user_data(const char *pkgname, uid_t uid, userid_t userid)
         }
     }
 
+    if (selinux_android_setfilecon(pkgdir, pkgname, seinfo, uid) < 0) {
+        ALOGE("cannot setfilecon dir '%s': %s\n", pkgdir, strerror(errno));
+        unlink(libsymlink);
+        unlink(pkgdir);
+        return -errno;
+    }
+
     if (symlink(applibdir, libsymlink) < 0) {
         ALOGE("couldn't symlink directory for non-primary '%s' -> '%s': %s\n", libsymlink,
                 applibdir, strerror(errno));
         unlink(pkgdir);
         return -1;
-    }
-
-    if (selinux_android_setfilecon(pkgdir, pkgname, uid) < 0) {
-        ALOGE("cannot setfilecon dir '%s': %s\n", pkgdir, strerror(errno));
-        unlink(libsymlink);
-        unlink(pkgdir);
-        return -errno;
     }
 
     if (chown(pkgdir, uid, uid) < 0) {
@@ -262,25 +269,38 @@ int make_user_data(const char *pkgname, uid_t uid, userid_t userid)
     return 0;
 }
 
-int delete_user(userid_t userid)
+int create_user(userid_t userid)
 {
-    char data_path[PKG_PATH_MAX];
-    if (create_user_path(data_path, userid)) {
-        return -1;
-    }
-    if (delete_dir_contents(data_path, 1, NULL)) {
-        return -1;
-    }
-
-    char media_path[PATH_MAX];
-    if (create_user_media_path(media_path, userid) == -1) {
-        return -1;
-    }
-    if (delete_dir_contents(media_path, 1, NULL) == -1) {
+    if (ensure_config_user_dirs(userid) == -1) {
         return -1;
     }
 
     return 0;
+}
+
+int delete_user(userid_t userid)
+{
+    int status = 0;
+
+    char data_path[PKG_PATH_MAX];
+    if ((create_user_path(data_path, userid) != 0)
+            || (delete_dir_contents(data_path, 1, NULL) != 0)) {
+        status = -1;
+    }
+
+    char media_path[PATH_MAX];
+    if ((create_user_media_path(media_path, userid) != 0)
+            || (delete_dir_contents(media_path, 1, NULL) != 0)) {
+        status = -1;
+    }
+
+    char config_path[PATH_MAX];
+    if ((create_user_config_path(config_path, userid) != 0)
+            || (delete_dir_contents(config_path, 1, NULL) != 0)) {
+        status = -1;
+    }
+
+    return status;
 }
 
 int delete_cache(const char *pkgname, userid_t userid)
@@ -291,7 +311,7 @@ int delete_cache(const char *pkgname, userid_t userid)
         return -1;
 
         /* delete contents, not the directory, no exceptions */
-    return delete_dir_contents(cachedir, 0, 0);
+    return delete_dir_contents(cachedir, 0, NULL);
 }
 
 /* Try to ensure free_size bytes of storage are available.
@@ -384,7 +404,7 @@ int free_cache(int64_t free_size)
     return data_disk_free() >= free_size ? 0 : -1;
 }
 
-int move_dex(const char *src, const char *dst)
+int move_dex(const char *src, const char *dst, const char *instruction_set)
 {
     char src_dex[PKG_PATH_MAX];
     char dst_dex[PKG_PATH_MAX];
@@ -392,8 +412,8 @@ int move_dex(const char *src, const char *dst)
     if (validate_apk_path(src)) return -1;
     if (validate_apk_path(dst)) return -1;
 
-    if (create_cache_path(src_dex, src)) return -1;
-    if (create_cache_path(dst_dex, dst)) return -1;
+    if (create_cache_path(src_dex, src, instruction_set)) return -1;
+    if (create_cache_path(dst_dex, dst, instruction_set)) return -1;
 
     ALOGV("move %s -> %s\n", src_dex, dst_dex);
     if (rename(src_dex, dst_dex) < 0) {
@@ -404,12 +424,12 @@ int move_dex(const char *src, const char *dst)
     }
 }
 
-int rm_dex(const char *path)
+int rm_dex(const char *path, const char *instruction_set)
 {
     char dex_path[PKG_PATH_MAX];
 
     if (validate_apk_path(path)) return -1;
-    if (create_cache_path(dex_path, path)) return -1;
+    if (create_cache_path(dex_path, path, instruction_set)) return -1;
 
     ALOGV("unlink %s\n", dex_path);
     if (unlink(dex_path) < 0) {
@@ -422,8 +442,8 @@ int rm_dex(const char *path)
 
 int get_size(const char *pkgname, userid_t userid, const char *apkpath,
              const char *libdirpath, const char *fwdlock_apkpath, const char *asecpath,
-             int64_t *_codesize, int64_t *_datasize, int64_t *_cachesize,
-             int64_t* _asecsize)
+             const char *instruction_set, int64_t *_codesize, int64_t *_datasize,
+             int64_t *_cachesize, int64_t* _asecsize)
 {
     DIR *d;
     int dfd;
@@ -453,7 +473,7 @@ int get_size(const char *pkgname, userid_t userid, const char *apkpath,
         }
     }
         /* count the cached dexfile as code */
-    if (!create_cache_path(path, apkpath)) {
+    if (!create_cache_path(path, apkpath, instruction_set)) {
         if (stat(path, &s) == 0) {
             codesize += stat_size(&s);
         }
@@ -540,7 +560,7 @@ done:
 }
 
 
-int create_cache_path(char path[PKG_PATH_MAX], const char *src)
+int create_cache_path(char path[PKG_PATH_MAX], const char *src, const char *instruction_set)
 {
     char *tmp;
     int srclen;
@@ -557,19 +577,21 @@ int create_cache_path(char path[PKG_PATH_MAX], const char *src)
         return -1;
     }
 
-    dstlen = srclen + strlen(DALVIK_CACHE_PREFIX) + 
-        strlen(DALVIK_CACHE_POSTFIX) + 1;
-    
+    dstlen = srclen + strlen(DALVIK_CACHE_PREFIX) +
+        strlen(instruction_set) +
+        strlen(DALVIK_CACHE_POSTFIX) + 2;
+
     if (dstlen > PKG_PATH_MAX) {
         return -1;
     }
 
-    sprintf(path,"%s%s%s",
+    sprintf(path,"%s%s/%s%s",
             DALVIK_CACHE_PREFIX,
+            instruction_set,
             src + 1, /* skip the leading / */
             DALVIK_CACHE_POSTFIX);
-    
-    for(tmp = path + strlen(DALVIK_CACHE_PREFIX); *tmp; tmp++) {
+
+    for(tmp = path + strlen(DALVIK_CACHE_PREFIX) + strlen(instruction_set) + 1; *tmp; tmp++) {
         if (*tmp == '/') {
             *tmp = '@';
         }
@@ -579,8 +601,13 @@ int create_cache_path(char path[PKG_PATH_MAX], const char *src)
 }
 
 static void run_dexopt(int zip_fd, int odex_fd, const char* input_file_name,
-    const char* output_file_name, const char* dexopt_flags)
+    const char* output_file_name)
 {
+    /* platform-specific flags affecting optimization and verification */
+    char dexopt_flags[PROPERTY_VALUE_MAX];
+    property_get("dalvik.vm.dexopt-flags", dexopt_flags, "");
+    ALOGV("dalvik.vm.dexopt-flags=%s\n", dexopt_flags);
+
     static const char* DEX_OPT_BIN = "/system/bin/dexopt";
     static const int MAX_INT_LEN = 12;      // '-'+10dig+'\0' -OR- 0x+8dig
     char zip_num[MAX_INT_LEN];
@@ -596,36 +623,90 @@ static void run_dexopt(int zip_fd, int odex_fd, const char* input_file_name,
 }
 
 static void run_dex2oat(int zip_fd, int oat_fd, const char* input_file_name,
-    const char* output_file_name, const char* dexopt_flags)
+    const char* output_file_name, const char *pkgname, const char *instruction_set)
 {
+    char dex2oat_flags[PROPERTY_VALUE_MAX];
+    bool have_dex2oat_flags = property_get("dalvik.vm.dex2oat-flags", dex2oat_flags, NULL) > 0;
+    ALOGV("dalvik.vm.dex2oat-flags=%s\n", dex2oat_flags);
+
+    char prop_buf[PROPERTY_VALUE_MAX];
+    bool profiler = (property_get("dalvik.vm.profiler", prop_buf, "0") > 0) && (prop_buf[0] == '1');
+
     static const char* DEX2OAT_BIN = "/system/bin/dex2oat";
     static const int MAX_INT_LEN = 12;      // '-'+10dig+'\0' -OR- 0x+8dig
+    static const unsigned int MAX_INSTRUCTION_SET_LEN = 32;
+
+    if (strlen(instruction_set) >= MAX_INSTRUCTION_SET_LEN) {
+        ALOGE("Instruction set %s longer than max length of %d",
+              instruction_set, MAX_INSTRUCTION_SET_LEN);
+        return;
+    }
+
     char zip_fd_arg[strlen("--zip-fd=") + MAX_INT_LEN];
     char zip_location_arg[strlen("--zip-location=") + PKG_PATH_MAX];
     char oat_fd_arg[strlen("--oat-fd=") + MAX_INT_LEN];
-    char oat_location_arg[strlen("--oat-name=") + PKG_PATH_MAX];
+    char oat_location_arg[strlen("--oat-location=") + PKG_PATH_MAX];
+    char instruction_set_arg[strlen("--instruction-set=") + MAX_INSTRUCTION_SET_LEN];
+    char profile_file_arg[strlen("--profile-file=") + PKG_PATH_MAX];
+    char top_k_profile_threshold_arg[strlen("--top-k-profile-threshold=") + PROPERTY_VALUE_MAX];
 
     sprintf(zip_fd_arg, "--zip-fd=%d", zip_fd);
     sprintf(zip_location_arg, "--zip-location=%s", input_file_name);
     sprintf(oat_fd_arg, "--oat-fd=%d", oat_fd);
     sprintf(oat_location_arg, "--oat-location=%s", output_file_name);
+    sprintf(instruction_set_arg, "--instruction-set=%s", instruction_set);
+
+    bool have_profile_file = false;
+    bool have_top_k_profile_threshold = false;
+    if (profiler && (strcmp(pkgname, "*") != 0)) {
+        char profile_file[PKG_PATH_MAX];
+        snprintf(profile_file, sizeof(profile_file), "%s/%s",
+                 DALVIK_CACHE_PREFIX "profiles", pkgname);
+        struct stat st;
+        if ((stat(profile_file, &st) == 0) && (st.st_size > 0)) {
+            sprintf(profile_file_arg, "--profile-file=%s", profile_file);
+            have_profile_file = true;
+            if (property_get("dalvik.vm.profile.top-k-thr", prop_buf, NULL) > 0) {
+                snprintf(top_k_profile_threshold_arg, sizeof(top_k_profile_threshold_arg),
+                         "--top-k-profile-threshold=%s", prop_buf);
+                have_top_k_profile_threshold = true;
+            }
+        }
+    }
 
     ALOGV("Running %s in=%s out=%s\n", DEX2OAT_BIN, input_file_name, output_file_name);
-    execl(DEX2OAT_BIN, DEX2OAT_BIN,
-          zip_fd_arg, zip_location_arg,
-          oat_fd_arg, oat_location_arg,
-          (char*) NULL);
+
+    char* argv[7  // program name, mandatory arguments and the final NULL
+               + (have_profile_file ? 1 : 0)
+               + (have_top_k_profile_threshold ? 1 : 0)
+               + (have_dex2oat_flags ? 1 : 0)];
+    int i = 0;
+    argv[i++] = (char*)DEX2OAT_BIN;
+    argv[i++] = zip_fd_arg;
+    argv[i++] = zip_location_arg;
+    argv[i++] = oat_fd_arg;
+    argv[i++] = oat_location_arg;
+    argv[i++] = instruction_set_arg;
+    if (have_profile_file) {
+        argv[i++] = profile_file_arg;
+    }
+    if (have_top_k_profile_threshold) {
+        argv[i++] = top_k_profile_threshold_arg;
+    }
+    if (have_dex2oat_flags) {
+        argv[i++] = dex2oat_flags;
+    }
+    argv[i] = NULL;
+
+    execv(DEX2OAT_BIN, (char* const *)argv);
     ALOGE("execl(%s) failed: %s\n", DEX2OAT_BIN, strerror(errno));
 }
 
-static int wait_dexopt(pid_t pid, const char* apk_path)
+static int wait_child(pid_t pid)
 {
     int status;
     pid_t got_pid;
 
-    /*
-     * Wait for the optimization process to finish.
-     */
     while (1) {
         got_pid = waitpid(pid, &status, 0);
         if (got_pid == -1 && errno == EINTR) {
@@ -641,21 +722,18 @@ static int wait_dexopt(pid_t pid, const char* apk_path)
     }
 
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        ALOGV("DexInv: --- END '%s' (success) ---\n", apk_path);
         return 0;
     } else {
-        ALOGW("DexInv: --- END '%s' --- status=0x%04x, process failed\n",
-            apk_path, status);
         return status;      /* always nonzero */
     }
 }
 
-int dexopt(const char *apk_path, uid_t uid, int is_public)
+int dexopt(const char *apk_path, uid_t uid, int is_public,
+           const char *pkgname, const char *instruction_set)
 {
     struct utimbuf ut;
     struct stat apk_stat, dex_stat;
     char out_path[PKG_PATH_MAX];
-    char dexopt_flags[PROPERTY_VALUE_MAX];
     char persist_sys_dalvik_vm_lib[PROPERTY_VALUE_MAX];
     char *end;
     int res, zip_fd=-1, out_fd=-1;
@@ -664,22 +742,22 @@ int dexopt(const char *apk_path, uid_t uid, int is_public)
         return -1;
     }
 
-    /* platform-specific flags affecting optimization and verification */
-    property_get("dalvik.vm.dexopt-flags", dexopt_flags, "");
-    ALOGV("dalvik.vm.dexopt_flags=%s\n", dexopt_flags);
-
-    /* The command to run depend ones the value of persist.sys.dalvik.vm.lib */
-    property_get("persist.sys.dalvik.vm.lib", persist_sys_dalvik_vm_lib, "libdvm.so");
+    /* The command to run depend on the value of persist.sys.dalvik.vm.lib */
+    property_get("persist.sys.dalvik.vm.lib.2", persist_sys_dalvik_vm_lib, "libart.so");
 
     /* Before anything else: is there a .odex file?  If so, we have
      * precompiled the apk and there is nothing to do here.
      */
-    sprintf(out_path, "%s%s", apk_path, ".odex");
-    if (stat(out_path, &dex_stat) == 0) {
-        return 0;
+    strcpy(out_path, apk_path);
+    end = strrchr(out_path, '.');
+    if (end != NULL) {
+        strcpy(end, ".odex");
+        if (stat(out_path, &dex_stat) == 0) {
+            return 0;
+        }
     }
 
-    if (create_cache_path(out_path, apk_path)) {
+    if (create_cache_path(out_path, apk_path, instruction_set)) {
         return -1;
     }
 
@@ -708,6 +786,12 @@ int dexopt(const char *apk_path, uid_t uid, int is_public)
         ALOGE("installd cannot chown '%s' during dexopt\n", out_path);
         goto fail;
     }
+
+    // Create profile file if there is a package name present.
+    if (strcmp(pkgname, "*") != 0) {
+        create_profile_file(pkgname, uid);
+    }
+
 
     ALOGV("DexInv: --- BEGIN '%s' ---\n", apk_path);
 
@@ -739,17 +823,19 @@ int dexopt(const char *apk_path, uid_t uid, int is_public)
         }
 
         if (strncmp(persist_sys_dalvik_vm_lib, "libdvm", 6) == 0) {
-            run_dexopt(zip_fd, out_fd, apk_path, out_path, dexopt_flags);
+            run_dexopt(zip_fd, out_fd, apk_path, out_path);
         } else if (strncmp(persist_sys_dalvik_vm_lib, "libart", 6) == 0) {
-            run_dex2oat(zip_fd, out_fd, apk_path, out_path, dexopt_flags);
+            run_dex2oat(zip_fd, out_fd, apk_path, out_path, pkgname, instruction_set);
         } else {
             exit(69);   /* Unexpected persist.sys.dalvik.vm.lib value */
         }
         exit(68);   /* only get here on exec failure */
     } else {
-        res = wait_dexopt(pid, apk_path);
-        if (res != 0) {
-            ALOGE("dexopt in='%s' out='%s' res=%d\n", apk_path, out_path, res);
+        res = wait_child(pid);
+        if (res == 0) {
+            ALOGV("DexInv: --- END '%s' (success) ---\n", apk_path);
+        } else {
+            ALOGE("DexInv: --- END '%s' --- status=0x%04x, process failed\n", apk_path, res);
             goto fail;
         }
     }
@@ -803,12 +889,12 @@ int movefileordir(char* srcpath, char* dstpath, int dstbasepos,
 
     int srcend = strlen(srcpath);
     int dstend = strlen(dstpath);
-    
+
     if (lstat(srcpath, statbuf) < 0) {
         ALOGW("Unable to stat %s: %s\n", srcpath, strerror(errno));
         return 1;
     }
-    
+
     if ((statbuf->st_mode&S_IFDIR) == 0) {
         mkinnerdirs(dstpath, dstbasepos, S_IRWXU|S_IRWXG|S_IXOTH,
                 dstuid, dstgid, statbuf);
@@ -834,7 +920,7 @@ int movefileordir(char* srcpath, char* dstpath, int dstbasepos,
     }
 
     res = 0;
-    
+
     while ((de = readdir(d))) {
         const char *name = de->d_name;
             /* always skip "." and ".." */
@@ -842,32 +928,32 @@ int movefileordir(char* srcpath, char* dstpath, int dstbasepos,
             if (name[1] == 0) continue;
             if ((name[1] == '.') && (name[2] == 0)) continue;
         }
-        
+
         if ((srcend+strlen(name)) >= (PKG_PATH_MAX-2)) {
             ALOGW("Source path too long; skipping: %s/%s\n", srcpath, name);
             continue;
         }
-        
+
         if ((dstend+strlen(name)) >= (PKG_PATH_MAX-2)) {
             ALOGW("Destination path too long; skipping: %s/%s\n", dstpath, name);
             continue;
         }
-        
+
         srcpath[srcend] = dstpath[dstend] = '/';
         strcpy(srcpath+srcend+1, name);
         strcpy(dstpath+dstend+1, name);
-        
+
         if (movefileordir(srcpath, dstpath, dstbasepos, dstuid, dstgid, statbuf) != 0) {
             res = 1;
         }
-        
+
         // Note: we will be leaving empty directories behind in srcpath,
         // but that is okay, the package manager will be erasing all of the
         // data associated with .apks that disappear.
-        
+
         srcpath[srcend] = dstpath[dstend] = 0;
     }
-    
+
     closedir(d);
     return res;
 }
@@ -909,7 +995,7 @@ int movefiles()
                         UPDATE_COMMANDS_DIR_PREFIX, name);
                 continue;
             }
-            
+
             bufp = 0;
             bufe = 0;
             buf[PKG_PATH_MAX] = 0;
@@ -1070,7 +1156,7 @@ int linklib(const char* pkgname, const char* asecLibDir, int userId)
         }
     } else {
         if (S_ISDIR(libStat.st_mode)) {
-            if (delete_dir_contents(libsymlink, 1, 0) < 0) {
+            if (delete_dir_contents(libsymlink, 1, NULL) < 0) {
                 rc = -1;
                 goto out;
             }
@@ -1102,4 +1188,223 @@ out:
     }
 
     return rc;
+}
+
+static void run_idmap(const char *target_apk, const char *overlay_apk, int idmap_fd)
+{
+    static const char *IDMAP_BIN = "/system/bin/idmap";
+    static const size_t MAX_INT_LEN = 32;
+    char idmap_str[MAX_INT_LEN];
+
+    snprintf(idmap_str, sizeof(idmap_str), "%d", idmap_fd);
+
+    execl(IDMAP_BIN, IDMAP_BIN, "--fd", target_apk, overlay_apk, idmap_str, (char*)NULL);
+    ALOGE("execl(%s) failed: %s\n", IDMAP_BIN, strerror(errno));
+}
+
+// Transform string /a/b/c.apk to (prefix)/a@b@c.apk@(suffix)
+// eg /a/b/c.apk to /data/resource-cache/a@b@c.apk@idmap
+static int flatten_path(const char *prefix, const char *suffix,
+        const char *overlay_path, char *idmap_path, size_t N)
+{
+    if (overlay_path == NULL || idmap_path == NULL) {
+        return -1;
+    }
+    const size_t len_overlay_path = strlen(overlay_path);
+    // will access overlay_path + 1 further below; requires absolute path
+    if (len_overlay_path < 2 || *overlay_path != '/') {
+        return -1;
+    }
+    const size_t len_idmap_root = strlen(prefix);
+    const size_t len_suffix = strlen(suffix);
+    if (SIZE_MAX - len_idmap_root < len_overlay_path ||
+            SIZE_MAX - (len_idmap_root + len_overlay_path) < len_suffix) {
+        // additions below would cause overflow
+        return -1;
+    }
+    if (N < len_idmap_root + len_overlay_path + len_suffix) {
+        return -1;
+    }
+    memset(idmap_path, 0, N);
+    snprintf(idmap_path, N, "%s%s%s", prefix, overlay_path + 1, suffix);
+    char *ch = idmap_path + len_idmap_root;
+    while (*ch != '\0') {
+        if (*ch == '/') {
+            *ch = '@';
+        }
+        ++ch;
+    }
+    return 0;
+}
+
+int idmap(const char *target_apk, const char *overlay_apk, uid_t uid)
+{
+    ALOGV("idmap target_apk=%s overlay_apk=%s uid=%d\n", target_apk, overlay_apk, uid);
+
+    int idmap_fd = -1;
+    char idmap_path[PATH_MAX];
+
+    if (flatten_path(IDMAP_PREFIX, IDMAP_SUFFIX, overlay_apk,
+                idmap_path, sizeof(idmap_path)) == -1) {
+        ALOGE("idmap cannot generate idmap path for overlay %s\n", overlay_apk);
+        goto fail;
+    }
+
+    unlink(idmap_path);
+    idmap_fd = open(idmap_path, O_RDWR | O_CREAT | O_EXCL, 0644);
+    if (idmap_fd < 0) {
+        ALOGE("idmap cannot open '%s' for output: %s\n", idmap_path, strerror(errno));
+        goto fail;
+    }
+    if (fchown(idmap_fd, AID_SYSTEM, uid) < 0) {
+        ALOGE("idmap cannot chown '%s'\n", idmap_path);
+        goto fail;
+    }
+    if (fchmod(idmap_fd, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH) < 0) {
+        ALOGE("idmap cannot chmod '%s'\n", idmap_path);
+        goto fail;
+    }
+
+    pid_t pid;
+    pid = fork();
+    if (pid == 0) {
+        /* child -- drop privileges before continuing */
+        if (setgid(uid) != 0) {
+            ALOGE("setgid(%d) failed during idmap\n", uid);
+            exit(1);
+        }
+        if (setuid(uid) != 0) {
+            ALOGE("setuid(%d) failed during idmap\n", uid);
+            exit(1);
+        }
+        if (flock(idmap_fd, LOCK_EX | LOCK_NB) != 0) {
+            ALOGE("flock(%s) failed during idmap: %s\n", idmap_path, strerror(errno));
+            exit(1);
+        }
+
+        run_idmap(target_apk, overlay_apk, idmap_fd);
+        exit(1); /* only if exec call to idmap failed */
+    } else {
+        int status = wait_child(pid);
+        if (status != 0) {
+            ALOGE("idmap failed, status=0x%04x\n", status);
+            goto fail;
+        }
+    }
+
+    close(idmap_fd);
+    return 0;
+fail:
+    if (idmap_fd >= 0) {
+        close(idmap_fd);
+        unlink(idmap_path);
+    }
+    return -1;
+}
+
+int restorecon_data(const char* pkgName, const char* seinfo, uid_t uid)
+{
+    struct dirent *entry;
+    DIR *d;
+    struct stat s;
+    char *userdir;
+    char *primarydir;
+    char *pkgdir;
+    int ret = 0;
+
+    // SELINUX_ANDROID_RESTORECON_DATADATA flag is set by libselinux. Not needed here.
+    unsigned int flags = SELINUX_ANDROID_RESTORECON_RECURSE;
+
+    if (!pkgName || !seinfo) {
+        ALOGE("Package name or seinfo tag is null when trying to restorecon.");
+        return -1;
+    }
+
+    if (asprintf(&primarydir, "%s%s%s", android_data_dir.path, PRIMARY_USER_PREFIX, pkgName) < 0) {
+        return -1;
+    }
+
+    // Relabel for primary user.
+    if (selinux_android_restorecon_pkgdir(primarydir, seinfo, uid, flags) < 0) {
+        ALOGE("restorecon failed for %s: %s\n", primarydir, strerror(errno));
+        ret |= -1;
+    }
+
+    if (asprintf(&userdir, "%s%s", android_data_dir.path, SECONDARY_USER_PREFIX) < 0) {
+        free(primarydir);
+        return -1;
+    }
+
+    // Relabel package directory for all secondary users.
+    d = opendir(userdir);
+    if (d == NULL) {
+        free(primarydir);
+        free(userdir);
+        return -1;
+    }
+
+    while ((entry = readdir(d))) {
+        if (entry->d_type != DT_DIR) {
+            continue;
+        }
+
+        const char *user = entry->d_name;
+        // Ignore "." and ".."
+        if (!strcmp(user, ".") || !strcmp(user, "..")) {
+            continue;
+        }
+
+        // user directories start with a number
+        if (user[0] < '0' || user[0] > '9') {
+            ALOGE("Expecting numbered directory during restorecon. Instead got '%s'.", user);
+            continue;
+        }
+
+        if (asprintf(&pkgdir, "%s%s/%s", userdir, user, pkgName) < 0) {
+            continue;
+        }
+
+        if (stat(pkgdir, &s) < 0) {
+            free(pkgdir);
+            continue;
+        }
+
+        if (selinux_android_restorecon_pkgdir(pkgdir, seinfo, uid, flags) < 0) {
+            ALOGE("restorecon failed for %s: %s\n", pkgdir, strerror(errno));
+            ret |= -1;
+        }
+        free(pkgdir);
+    }
+
+    closedir(d);
+    free(primarydir);
+    free(userdir);
+    return ret;
+}
+
+static int prune_dex_exclusion_predicate(const char *file_name, const int is_dir)
+{
+    // Don't exclude any directories, we want to inspect them
+    // recusively for files.
+    if (is_dir) {
+      return 0;
+    }
+
+
+    // Don't exclude regular files that start with the list
+    // of prefixes.
+    static const char data_app_prefix[] = "data@app@";
+    static const char data_priv_app_prefix[] = "data@priv-app@";
+    if (!strncmp(file_name, data_app_prefix, sizeof(data_app_prefix) - 1) ||
+        !strncmp(file_name, data_priv_app_prefix, sizeof(data_priv_app_prefix) - 1)) {
+      return 0;
+    }
+
+    // Exclude all regular files that don't start with the prefix "data@app@" or
+    // "data@priv-app@".
+    return 1;
+}
+
+int prune_dex_cache() {
+  return delete_dir_contents(DALVIK_CACHE_PREFIX, 0, &prune_dex_exclusion_predicate);
 }

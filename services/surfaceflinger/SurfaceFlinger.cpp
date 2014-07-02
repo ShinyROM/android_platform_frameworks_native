@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <math.h>
 #include <dlfcn.h>
+#include <inttypes.h>
 
 #include <EGL/egl.h>
 
@@ -318,128 +319,6 @@ void SurfaceFlinger::deleteTextureAsync(uint32_t texture) {
     postMessageAsync(new MessageDestroyGLTexture(getRenderEngine(), texture));
 }
 
-status_t SurfaceFlinger::selectConfigForAttribute(
-        EGLDisplay dpy,
-        EGLint const* attrs,
-        EGLint attribute, EGLint wanted,
-        EGLConfig* outConfig)
-{
-    EGLConfig config = NULL;
-    EGLint numConfigs = -1, n=0;
-    eglGetConfigs(dpy, NULL, 0, &numConfigs);
-    EGLConfig* const configs = new EGLConfig[numConfigs];
-    eglChooseConfig(dpy, attrs, configs, numConfigs, &n);
-
-    if (n) {
-        if (attribute != EGL_NONE) {
-            for (int i=0 ; i<n ; i++) {
-                EGLint value = 0;
-                eglGetConfigAttrib(dpy, configs[i], attribute, &value);
-                if (wanted == value) {
-                    *outConfig = configs[i];
-                    delete [] configs;
-                    return NO_ERROR;
-                }
-            }
-        } else {
-            // just pick the first one
-            *outConfig = configs[0];
-            delete [] configs;
-            return NO_ERROR;
-        }
-    }
-    delete [] configs;
-    return NAME_NOT_FOUND;
-}
-
-class EGLAttributeVector {
-    struct Attribute;
-    class Adder;
-    friend class Adder;
-    KeyedVector<Attribute, EGLint> mList;
-    struct Attribute {
-        Attribute() {};
-        Attribute(EGLint v) : v(v) { }
-        EGLint v;
-        bool operator < (const Attribute& other) const {
-            // this places EGL_NONE at the end
-            EGLint lhs(v);
-            EGLint rhs(other.v);
-            if (lhs == EGL_NONE) lhs = 0x7FFFFFFF;
-            if (rhs == EGL_NONE) rhs = 0x7FFFFFFF;
-            return lhs < rhs;
-        }
-    };
-    class Adder {
-        friend class EGLAttributeVector;
-        EGLAttributeVector& v;
-        EGLint attribute;
-        Adder(EGLAttributeVector& v, EGLint attribute)
-            : v(v), attribute(attribute) {
-        }
-    public:
-        void operator = (EGLint value) {
-            if (attribute != EGL_NONE) {
-                v.mList.add(attribute, value);
-            }
-        }
-        operator EGLint () const { return v.mList[attribute]; }
-    };
-public:
-    EGLAttributeVector() {
-        mList.add(EGL_NONE, EGL_NONE);
-    }
-    void remove(EGLint attribute) {
-        if (attribute != EGL_NONE) {
-            mList.removeItem(attribute);
-        }
-    }
-    Adder operator [] (EGLint attribute) {
-        return Adder(*this, attribute);
-    }
-    EGLint operator [] (EGLint attribute) const {
-       return mList[attribute];
-    }
-    // cast-operator to (EGLint const*)
-    operator EGLint const* () const { return &mList.keyAt(0).v; }
-};
-
-status_t SurfaceFlinger::selectEGLConfig(EGLDisplay display, EGLint nativeVisualId,
-    EGLint renderableType, EGLConfig* config) {
-    // select our EGLConfig. It must support EGL_RECORDABLE_ANDROID if
-    // it is to be used with WIFI displays
-    status_t err;
-    EGLint wantedAttribute;
-    EGLint wantedAttributeValue;
-
-    EGLAttributeVector attribs;
-    if (renderableType) {
-        attribs[EGL_RENDERABLE_TYPE]            = renderableType;
-        attribs[EGL_RECORDABLE_ANDROID]         = EGL_TRUE;
-        attribs[EGL_SURFACE_TYPE]               = EGL_WINDOW_BIT|EGL_PBUFFER_BIT;
-        attribs[EGL_FRAMEBUFFER_TARGET_ANDROID] = EGL_TRUE;
-        attribs[EGL_RED_SIZE]                   = 8;
-        attribs[EGL_GREEN_SIZE]                 = 8;
-        attribs[EGL_BLUE_SIZE]                  = 8;
-        wantedAttribute                         = EGL_NONE;
-        wantedAttributeValue                    = EGL_NONE;
-
-    } else {
-        // if no renderable type specified, fallback to a simplified query
-        wantedAttribute                         = EGL_NATIVE_VISUAL_ID;
-        wantedAttributeValue                    = nativeVisualId;
-    }
-
-    err = selectConfigForAttribute(display, attribs, wantedAttribute,
-        wantedAttributeValue, config);
-    if (err == NO_ERROR) {
-        EGLint caveat;
-        if (eglGetConfigAttrib(display, *config, EGL_CONFIG_CAVEAT, &caveat))
-            ALOGW_IF(caveat == EGL_SLOW_CONFIG, "EGL_SLOW_CONFIG selected!");
-    }
-    return err;
-}
-
 class DispSyncSource : public VSyncSource, private DispSync::Callback {
 public:
     DispSyncSource(DispSync* dispSync, nsecs_t phaseOffset, bool traceVsync) :
@@ -521,55 +400,11 @@ void SurfaceFlinger::init() {
     mHwc = new HWComposer(this,
             *static_cast<HWComposer::EventHandler *>(this));
 
-    // First try to get an ES2 config
-#ifdef TARGET_DISABLE_SURFACEFLINGER_GLES2
-	ALOGW("OpenGL ES 2.0 disabled for this device");
-	err = !NO_ERROR;
-#else
-    err = selectEGLConfig(mEGLDisplay, mHwc->getVisualID(), EGL_OPENGL_ES2_BIT,
-            &mEGLConfig);
-#endif
-
-    if (err != NO_ERROR) {
-        // If ES2 fails, try ES1
-        err = selectEGLConfig(mEGLDisplay, mHwc->getVisualID(),
-                EGL_OPENGL_ES_BIT, &mEGLConfig);
-    }
-
-    if (err != NO_ERROR) {
-        // still didn't work, probably because we're on the emulator...
-        // try a simplified query
-        ALOGW("no suitable EGLConfig found, trying a simpler query");
-        err = selectEGLConfig(mEGLDisplay, mHwc->getVisualID(), 0, &mEGLConfig);
-    }
-
-    if (err != NO_ERROR) {
-        // this EGL is too lame for android
-        LOG_ALWAYS_FATAL("no suitable EGLConfig found, giving up");
-    }
-
-    // print some debugging info
-    EGLint r,g,b,a;
-    eglGetConfigAttrib(mEGLDisplay, mEGLConfig, EGL_RED_SIZE,   &r);
-    eglGetConfigAttrib(mEGLDisplay, mEGLConfig, EGL_GREEN_SIZE, &g);
-    eglGetConfigAttrib(mEGLDisplay, mEGLConfig, EGL_BLUE_SIZE,  &b);
-    eglGetConfigAttrib(mEGLDisplay, mEGLConfig, EGL_ALPHA_SIZE, &a);
-    ALOGI("EGL informations:");
-    ALOGI("vendor    : %s", eglQueryString(mEGLDisplay, EGL_VENDOR));
-    ALOGI("version   : %s", eglQueryString(mEGLDisplay, EGL_VERSION));
-    ALOGI("extensions: %s", eglQueryString(mEGLDisplay, EGL_EXTENSIONS));
-    ALOGI("Client API: %s", eglQueryString(mEGLDisplay, EGL_CLIENT_APIS)?:"Not Supported");
-    ALOGI("EGLSurface: %d-%d-%d-%d, config=%p", r, g, b, a, mEGLConfig);
-
     // get a RenderEngine for the given display / config (can't fail)
-    mRenderEngine = RenderEngine::create(mEGLDisplay, mEGLConfig);
+    mRenderEngine = RenderEngine::create(mEGLDisplay, mHwc->getVisualID());
 
     // retrieve the EGL context that was selected/created
     mEGLContext = mRenderEngine->getEGLContext();
-
-    // figure out which format we got
-    eglGetConfigAttrib(mEGLDisplay, mEGLConfig,
-            EGL_NATIVE_VISUAL_ID, &mEGLNativeVisualId);
 
     LOG_ALWAYS_FATAL_IF(mEGLContext == EGL_NO_CONTEXT,
             "couldn't create EGLContext");
@@ -586,15 +421,16 @@ void SurfaceFlinger::init() {
 
             sp<BufferQueue> bq = new BufferQueue(new GraphicBufferAlloc());
             sp<FramebufferSurface> fbs = new FramebufferSurface(*mHwc, i, bq);
+            int32_t hwcId = allocateHwcDisplayId(type);
             sp<DisplayDevice> hw = new DisplayDevice(this,
-                    type, allocateHwcDisplayId(type), isSecure, token,
+                    type, hwcId, mHwc->getFormat(hwcId), isSecure, token,
                     fbs, bq,
-                    mEGLConfig);
+                    mRenderEngine->getEGLConfig());
             if (i > DisplayDevice::DISPLAY_PRIMARY) {
                 // FIXME: currently we don't get blank/unblank requests
                 // for displays other than the main display, so we always
                 // assume a connected display is unblanked.
-                ALOGD("marking display %d as acquired/unblanked", i);
+                ALOGD("marking display %zu as acquired/unblanked", i);
                 hw->acquireScreen();
             }
             mDisplays.add(token, hw);
@@ -1351,8 +1187,10 @@ void SurfaceFlinger::handleTransactionLocked(uint32_t transactionFlags)
                     const wp<IBinder>& display(curr.keyAt(i));
                     if (dispSurface != NULL) {
                         sp<DisplayDevice> hw = new DisplayDevice(this,
-                                state.type, hwcDisplayId, state.isSecure,
-                                display, dispSurface, producer, mEGLConfig);
+                                state.type, hwcDisplayId,
+                                mHwc->getFormat(hwcDisplayId), state.isSecure,
+                                display, dispSurface, producer,
+                                mRenderEngine->getEGLConfig());
                         hw->setLayerStack(state.layerStack);
                         hw->setProjection(state.orientation,
                                 state.viewport, state.frame);
@@ -1802,7 +1640,7 @@ void SurfaceFlinger::doComposeSurfaces(const sp<const DisplayDevice>& hw, const 
                     case HWC_FRAMEBUFFER_TARGET: {
                         // this should not happen as the iterator shouldn't
                         // let us get there.
-                        ALOGW("HWC_FRAMEBUFFER_TARGET found in hwc list (index=%d)", i);
+                        ALOGW("HWC_FRAMEBUFFER_TARGET found in hwc list (index=%zu)", i);
                         break;
                     }
                 }
@@ -2387,7 +2225,7 @@ void SurfaceFlinger::dumpStatsLocked(const Vector<String16>& args, size_t& index
 
     const nsecs_t period =
             getHwComposer().getRefreshPeriod(HWC_DISPLAY_PRIMARY);
-    result.appendFormat("%lld\n", period);
+    result.appendFormat("%" PRId64 "\n", period);
 
     if (name.isEmpty()) {
         mAnimFrameTracker.dump(result);
@@ -2500,7 +2338,7 @@ void SurfaceFlinger::dumpAllLocked(const Vector<String16>& args, size_t& index,
     const LayerVector& currentLayers = mCurrentState.layersSortedByZ;
     const size_t count = currentLayers.size();
     colorizer.bold(result);
-    result.appendFormat("Visible layers (count = %d)\n", count);
+    result.appendFormat("Visible layers (count = %zu)\n", count);
     colorizer.reset(result);
     for (size_t i=0 ; i<count ; i++) {
         const sp<Layer>& layer(currentLayers[i]);
@@ -2512,7 +2350,7 @@ void SurfaceFlinger::dumpAllLocked(const Vector<String16>& args, size_t& index,
      */
 
     colorizer.bold(result);
-    result.appendFormat("Displays (%d entries)\n", mDisplays.size());
+    result.appendFormat("Displays (%zu entries)\n", mDisplays.size());
     colorizer.reset(result);
     for (size_t dpy=0 ; dpy<mDisplays.size() ; dpy++) {
         const sp<const DisplayDevice>& hw(mDisplays[dpy]);
@@ -2549,7 +2387,6 @@ void SurfaceFlinger::dumpAllLocked(const Vector<String16>& args, size_t& index,
             "  refresh-rate              : %f fps\n"
             "  x-dpi                     : %f\n"
             "  y-dpi                     : %f\n"
-            "  EGL_NATIVE_VISUAL_ID      : %d\n"
             "  gpu_to_cpu_unsupported    : %d\n"
             ,
             mLastSwapBufferTime/1000.0,
@@ -2558,7 +2395,6 @@ void SurfaceFlinger::dumpAllLocked(const Vector<String16>& args, size_t& index,
             1e9 / hwc.getRefreshPeriod(HWC_DISPLAY_PRIMARY),
             hwc.getDpiX(HWC_DISPLAY_PRIMARY),
             hwc.getDpiY(HWC_DISPLAY_PRIMARY),
-            mEGLNativeVisualId,
             !mGpuToCpuSupported);
 
     result.appendFormat("  eglSwapBuffers time: %f us\n",
@@ -2803,7 +2639,7 @@ class GraphicProducerWrapper : public BBinder, public MessageHandler {
             looper->sendMessage(this, Message(MSG_API_CALL));
             barrier.wait();
         }
-        return NO_ERROR;
+        return result;
     }
 
     /*
@@ -2813,7 +2649,7 @@ class GraphicProducerWrapper : public BBinder, public MessageHandler {
     virtual void handleMessage(const Message& message) {
         android_atomic_release_load(&memoryBarrier);
         if (message.what == MSG_API_CALL) {
-            impl->asBinder()->transact(code, data[0], reply);
+            result = impl->asBinder()->transact(code, data[0], reply);
             barrier.open();
         } else if (message.what == MSG_EXIT) {
             exitRequested = true;
@@ -3113,7 +2949,7 @@ void SurfaceFlinger::checkScreenshot(size_t w, size_t s, size_t h, void const* v
             const bool visible = (state.layerStack == hw->getLayerStack())
                                 && (state.z >= minLayerZ && state.z <= maxLayerZ)
                                 && (layer->isVisible());
-            ALOGE("%c index=%d, name=%s, layerStack=%d, z=%d, visible=%d, flags=%x, alpha=%x",
+            ALOGE("%c index=%zu, name=%s, layerStack=%d, z=%d, visible=%d, flags=%x, alpha=%x",
                     visible ? '+' : '-',
                             i, layer->getName().string(), state.layerStack, state.z,
                             layer->isVisible(), state.flags, state.alpha);

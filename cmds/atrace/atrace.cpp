@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <inttypes.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -83,6 +84,7 @@ static const TracingCategory k_categories[] = {
     { "res",        "Resource Loading", ATRACE_TAG_RESOURCES, { } },
     { "dalvik",     "Dalvik VM",        ATRACE_TAG_DALVIK, { } },
     { "rs",         "RenderScript",     ATRACE_TAG_RS, { } },
+    { "bionic",     "Bionic C Library", ATRACE_TAG_BIONIC, { } },
     { "sched",      "CPU Scheduling",   0, {
         { REQ,      "/sys/kernel/debug/tracing/events/sched/sched_switch/enable" },
         { REQ,      "/sys/kernel/debug/tracing/events/sched/sched_wakeup/enable" },
@@ -368,7 +370,7 @@ static bool pokeBinderServices()
 static bool setTagsProperty(uint64_t tags)
 {
     char buf[64];
-    snprintf(buf, 64, "%#llx", tags);
+    snprintf(buf, 64, "%#" PRIx64, tags);
     if (property_set(k_traceTagsProperty, buf) < 0) {
         fprintf(stderr, "error setting trace tags system property\n");
         return false;
@@ -665,7 +667,7 @@ static void dumpTrace()
     close(traceFD);
 }
 
-static void handleSignal(int signo)
+static void handleSignal(int /*signo*/)
 {
     if (!g_nohup) {
         g_traceAborted = true;
